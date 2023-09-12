@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Process an image with the trained neural network
 Usage:
-    demo.py [options] <yaml-config> <checkpoint> <images>...
+    demo.py [options] <yaml-config> <checkpoint> <input-dir> <output-dir>...
     demo.py (-h | --help )
 
 Arguments:
    <yaml-config>                 Path to the yaml hyper-parameter file
    <checkpoint>                  Path to the checkpoint
-   <images>                      Path to images
+   <input-dir>                   Path to images
+   <output-dir>                  Output directory for npz files containing lines and scores
 
 Options:
    -h --help                     Show this screen.
@@ -18,6 +19,7 @@ import os
 import os.path as osp
 import pprint
 import random
+import glob
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -25,6 +27,7 @@ import numpy as np
 import skimage.io
 import skimage.transform
 import torch
+import torch.mps as mps
 import yaml
 from docopt import docopt
 
@@ -47,25 +50,29 @@ def c(x):
 
 
 def main():
-    args = docopt(__doc__)
-    config_file = args["<yaml-config>"] or "config/wireframe.yaml"
-    C.update(C.from_yaml(filename=config_file))
-    M.update(C.model)
+    args = docopt(__doc__)  # parse arguments based on docstring above
+    config_file = args["<yaml-config>"] or "config/wireframe.yaml"  # if no yaml config file is specified, use the default
+    C.update(C.from_yaml(filename=config_file)) # store config in dict (C is a Box object which is just an extension of dict)
+    M.update(C.model)    # get the model part out of config
     pprint.pprint(C, indent=4)
 
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
 
+    # configuring device for torch (cuda if supported (nvidia), mps if apple, cpu otherwise)
     device_name = "cpu"
     os.environ["CUDA_VISIBLE_DEVICES"] = args["--devices"]
     if torch.cuda.is_available():
         device_name = "cuda"
-        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.deterministic = True   # TODO check if I need sth like this in mps
         torch.cuda.manual_seed(0)
         print("Let's use", torch.cuda.device_count(), "GPU(s)!")
+    elif torch.backends.mps.is_available():
+        device_name = "mps"
+        print("MPS is enabled")
     else:
-        print("CUDA is not available")
+        print("using CPU")
     device = torch.device(device_name)
     checkpoint = torch.load(args["<checkpoint>"], map_location=device)
 
@@ -83,9 +90,11 @@ def main():
     model = model.to(device)
     model.eval()
 
-    for imname in args["<images>"]:
-        print(f"Processing {imname}")
-        im = skimage.io.imread(imname)
+    # Process images
+    img_list = glob.glob(args["<input-dir>"] + "/*", recursive=True)
+    for img_path in img_list:
+        print(f"Processing {img_path}")
+        im = skimage.io.imread(img_path)
         if im.ndim == 2:
             im = np.repeat(im[:, :, None], 3, 2)
         im = im[:, :, :3]
@@ -111,9 +120,9 @@ def main():
             }
             H = model(input_dict)["preds"]
 
-        lines = H["lines"][0].cpu().numpy() / 128 * im.shape[:2]
+        lines = H["lines"][0].cpu().numpy() / 128 * im.shape[:2] # TODO what does this scaling do?
         scores = H["score"][0].cpu().numpy()
-        for i in range(1, len(lines)):
+        for i in range(1, len(lines)):      # TODO why this cutoff?
             if (lines[i] == lines[0]).all():
                 lines = lines[:i]
                 scores = scores[:i]
@@ -123,22 +132,13 @@ def main():
         diag = (im.shape[0] ** 2 + im.shape[1] ** 2) ** 0.5
         nlines, nscores = postprocess(lines, scores, diag * 0.01, 0, False)
 
-        for i, t in enumerate([0.94, 0.95, 0.96, 0.97, 0.98, 0.99]):
-            plt.gca().set_axis_off()
-            plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-            plt.margins(0, 0)
-            for (a, b), s in zip(nlines, nscores):
-                if s < t:
-                    continue
-                plt.plot([a[1], b[1]], [a[0], b[0]], c=c(s), linewidth=2, zorder=s)
-                plt.scatter(a[1], a[0], **PLTOPTS)
-                plt.scatter(b[1], b[0], **PLTOPTS)
-            plt.gca().xaxis.set_major_locator(plt.NullLocator())
-            plt.gca().yaxis.set_major_locator(plt.NullLocator())
-            plt.imshow(im)
-            plt.savefig(imname.replace(".png", f"-{t:.02f}.svg"), bbox_inches="tight")
-            plt.show()
-            plt.close()
+        # TODO save nlines and nscores to npz
+        img_name = str(osp.basename(img_path)) # extract image name from path
+        np.savez(
+            osp.join(args["<output-dir>"][0], img_name.replace(".jpg","")),
+            nlines = nlines,
+            nscores = nscores
+        ) # save lines and scores to npz file
 
 
 if __name__ == "__main__":
