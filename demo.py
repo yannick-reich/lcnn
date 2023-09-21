@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process an image with the trained neural network
+"""Process a folder of images with the trained neural network
 Usage:
     demo.py [options] <yaml-config> <checkpoint> <input-dir> <output-dir>...
     demo.py (-h | --help )
